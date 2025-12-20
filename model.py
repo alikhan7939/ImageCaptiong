@@ -7,36 +7,66 @@ class EncoderCNN(nn.Module):
         super(EncoderCNN, self).__init__()
         self.train_CNN = train_CNN
         self.inception = models.inception_v3(pretrained=True, aux_logits=False)
+        
+        # حذف classifier اصلی و جایگزینی
         self.inception.fc = nn.Linear(self.inception.fc.in_features, embed_size)
-        self.relu = nn.ReLU()
+        
+        # فریز کردن ویژگی‌گیرها
+        for name, param in self.inception.named_parameters():
+            if "fc" in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = train_CNN
+                
         self.dropout = nn.Dropout(0.5)
+        self.relu = nn.ReLU()
 
     def forward(self, images):
         features = self.inception(images)
-        
-        for name, param in self.inception.named_parameters():
-            if "fc.weight" in name or "fc.bias" in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = self.train_CNN
-
         return self.dropout(self.relu(features))
 
 class DecoderRNN(nn.Module):
-    def __init__(self, embed_size, hidden_size, vocab_size, num_layers):
+    def __init__(self, embed_size, hidden_size, vocab_size, num_layers=1):
         super(DecoderRNN, self).__init__()
         self.embed = nn.Embedding(vocab_size, embed_size)
-        self.lstm = nn.LSTM(embed_size, hidden_size, num_layers)
+        self.lstm = nn.LSTM(embed_size, hidden_size, num_layers, batch_first=True)  # بهتره batch_first=True باشه
         self.linear = nn.Linear(hidden_size, vocab_size)
         self.dropout = nn.Dropout(0.5)
 
     def forward(self, features, captions):
-        embeddings = self.dropout(self.embed(captions))
-        embeddings = torch.cat((features.unsqueeze(0), embeddings), dim=0)
-        hiddens, _ = self.lstm(embeddings)
-        outputs = self.linear(hiddens)
+        # features: (batch_size, embed_size)
+        # captions: (batch_size, seq_len)
+        
+        embeddings = self.dropout(self.embed(captions[:, :-1]))  # حذف <end> برای teacher forcing
+        embeddings = torch.cat((features.unsqueeze(1), embeddings), dim=1)  # (batch, seq_len+1, embed_size)
+        
+        lstm_out, _ = self.lstm(embeddings)
+        outputs = self.linear(lstm_out)
         return outputs
 
+    def sample(self, features, max_length=20, start_token=1):  # start_token معمولاً index کلمه <start>
+        """
+        تولید کپشن به صورت greedy
+        """
+        self.eval()
+        with torch.no_grad():
+            inputs = features.unsqueeze(1)  # (batch, 1, embed_size)
+            hidden = None
+            caption = []
+            
+            for _ in range(max_length):
+                lstm_out, hidden = self.lstm(inputs, hidden)
+                output = self.linear(lstm_out.squeeze(1))
+                predicted = output.argmax(1)
+                
+                caption.append(predicted.item())
+                
+                if predicted.item() == 2:  # فرض <end> index=2 باشه
+                    break
+                    
+                inputs = self.embed(predicted).unsqueeze(1)
+                
+            return caption
 
 class CNNtoRNN(nn.Module):
     def __init__(self, embed_size, hidden_size, vocab_size, num_layers):
